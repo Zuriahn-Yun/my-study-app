@@ -58,7 +58,7 @@ async function extractText(file) {
   }
   if (ext === "xlsx" || ext === "xls") {
     const XLSX = await import("xlsx");
-    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const workbook = XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: "array" });
     return workbook.SheetNames.map(name =>
       `[Sheet: ${name}]\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`
     ).join("\n\n");
