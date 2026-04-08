@@ -398,7 +398,7 @@ export default function App() {
     if (selectedBooks.length === 0) return;
     if (!apiKeys[activeProvider]) { setShowSettings(true); return; }
 
-    const content = pageRange ? `[Focus on pages: ${pageRange}]\n\n${input.trim()}` : input.trim();
+    const content = pageRange ? `[Focus only on the pages where the printed page number is ${pageRange}. Use the number physically printed on the page, not the PDF file's sequential position.]\n\n${input.trim()}` : input.trim();
     const userMsg = { role: "user", content, provider: activeProvider, model: activeModelId };
     idb.addMessage(userMsg);
     const newChat = [...chat, userMsg];
@@ -431,7 +431,7 @@ export default function App() {
       }
     }
 
-    const systemPrompt = `You are an expert academic assistant analyzing books and PDFs. Documents: ${selectedBooks.map(b => b.name).join(", ")}. Provide clear, well-structured analysis. Extract key concepts. Use markdown formatting for readability.`;
+    const systemPrompt = `You are an expert academic assistant analyzing books and PDFs. Documents: ${selectedBooks.map(b => b.name).join(", ")}. When the user specifies a page range, always refer to the page numbers physically printed on the pages — never use the sequential position of a page within the PDF file. Provide clear, well-structured analysis. Extract key concepts. Use markdown formatting for readability.`;
 
     try {
       let resp = "";
