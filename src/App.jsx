@@ -41,18 +41,6 @@ function encode64(buffer) {
 }
 async function fileToBase64(file) { return encode64(await file.arrayBuffer()); }
 
-// Translate a page range string using a book's page offset.
-// offset = number to add to a book page number to get the PDF page number.
-// e.g. offset=7 means book page 1 = PDF page 8.
-function translatePageRange(range, offset) {
-  if (!offset || offset === 0) return { bookRange: range, pdfRange: range };
-  const parts = range.split("-").map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
-  if (parts.length === 0) return { bookRange: range, pdfRange: range };
-  const pdfStart = parts[0] + offset;
-  const pdfEnd = parts.length > 1 ? parts[1] + offset : pdfStart;
-  const pdfRange = parts.length > 1 ? `${pdfStart}-${pdfEnd}` : `${pdfStart}`;
-  return { bookRange: range, pdfRange };
-}
 
 async function callClaude({ apiKey, modelId, systemPrompt, messages, books }) {
   const pdfBlocks = books.map(b => ({ type: "document", source: { type: "base64", media_type: "application/pdf", data: b.data } }));
@@ -277,15 +265,11 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState({});
   const [activeProvider, setActiveProvider] = useState("claude");
   const [activeModelId, setActiveModelId] = useState("claude-sonnet-4-5");
-  // { bookId, classId } when editing a book's page offset, null otherwise
-  const [editingOffset, setEditingOffset] = useState(null);
-  const [offsetDraft, setOffsetDraft] = useState("");
   const fileInputRef = useRef();
   const chatEndRef = useRef();
   const textareaRef = useRef();
-  const offsetInputRef = useRef();
 
-  // Load all data from IndexedDB on mount
+  // Load all data from IndexedDB on mount (removed offset editing state — use plain page range input)
   useEffect(() => {
     async function load() {
       try {
@@ -311,11 +295,6 @@ export default function App() {
     }
     load();
   }, []);
-
-  // Focus offset input when it opens
-  useEffect(() => {
-    if (editingOffset) offsetInputRef.current?.focus();
-  }, [editingOffset]);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chat, loading]);
 
@@ -411,17 +390,6 @@ export default function App() {
     setActiveBookIds(prev => prev.filter(id => id !== bookId));
   }
 
-  function commitOffset(classId, bookId) {
-    const parsed = parseInt(offsetDraft, 10);
-    const offset = isNaN(parsed) ? 0 : parsed;
-    const targetClass = classes.find(c => c.id === classId);
-    if (!targetClass) return;
-    const updatedClass = { ...targetClass, books: targetClass.books.map(b => b.id === bookId ? { ...b, pageOffset: offset } : b) };
-    setClasses(prev => prev.map(c => c.id === classId ? updatedClass : c));
-    idb.putClass(updatedClass);
-    setEditingOffset(null);
-  }
-
   function toggleBook(bookId) { setActiveBookIds(prev => prev.includes(bookId) ? prev.filter(id => id !== bookId) : [...prev, bookId]); }
   function toggleExpand(classId) { setExpandedClasses(prev => ({ ...prev, [classId]: !prev[classId] })); setActiveClassId(classId); setActiveBookIds([]); }
 
@@ -463,26 +431,7 @@ export default function App() {
       }
     }
 
-    // Build page offset instructions for the system prompt.
-    // offset = number to add to a printed book page to get the PDF page number.
-    // e.g. offset 7 means "book page 1" is PDF page 8.
-    const offsetNotes = selectedBooks
-      .filter(b => b.pageOffset && b.pageOffset !== 0)
-      .map(b => {
-        const { bookRange, pdfRange } = translatePageRange(pageRange || "N", b.pageOffset);
-        return pageRange
-          ? `"${b.name}": book pages ${bookRange} = PDF pages ${pdfRange}`
-          : `"${b.name}": add ${b.pageOffset} to any book page number to get the PDF page`;
-      });
-
-    const systemPrompt = [
-      "You are an expert academic assistant analyzing books and PDFs.",
-      `Documents: ${selectedBooks.map(b => b.name).join(", ")}.`,
-      offsetNotes.length > 0
-        ? `Page number mapping — ${offsetNotes.join("; ")}. When the user specifies book page numbers, use the PDF page numbers above.`
-        : "",
-      "Provide clear, well-structured analysis. Extract key concepts. Use markdown formatting for readability.",
-    ].filter(Boolean).join(" ");
+    const systemPrompt = `You are an expert academic assistant analyzing books and PDFs. Documents: ${selectedBooks.map(b => b.name).join(", ")}. Provide clear, well-structured analysis. Extract key concepts. Use markdown formatting for readability.`;
 
     try {
       let resp = "";
@@ -532,7 +481,6 @@ export default function App() {
         .msg-in{animation:fadeUp 0.18s ease}
         ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--color-border-secondary);border-radius:2px}
         .hov:hover{background:var(--color-background-secondary)!important}
-        .book-row:hover .offset-btn{opacity:1!important}
         textarea{resize:none;outline:none;border:none;background:transparent;width:100%;font-family:var(--font-sans);font-size:14px;color:var(--color-text-primary);line-height:1.5}
         textarea::placeholder{color:var(--color-text-tertiary)}
       `}</style>
@@ -582,36 +530,10 @@ export default function App() {
               {expandedClasses[cls.id] && (
                 <div style={{ paddingLeft:6 }}>
                   {cls.books.map(book => (
-                    <div key={book.id} className="book-row hov" onClick={()=>{setActiveClassId(cls.id);toggleBook(book.id);}} style={{ display:"flex",alignItems:"center",gap:5,padding:"5px 8px 5px 20px",cursor:"pointer",borderRadius:6,margin:"1px 5px",position:"relative" }}>
+                    <div key={book.id} className="hov" onClick={()=>{setActiveClassId(cls.id);toggleBook(book.id);}} style={{ display:"flex",alignItems:"center",gap:6,padding:"5px 10px 5px 20px",cursor:"pointer",borderRadius:6,margin:"1px 5px" }}>
                       <input type="checkbox" checked={activeBookIds.includes(book.id) && activeClassId===cls.id} onChange={()=>{}} style={{ accentColor:cls.color,cursor:"pointer",flexShrink:0,width:13,height:13 }} onClick={e=>e.stopPropagation()}/>
                       <FileIcon size={11}/>
                       <span style={{ flex:1,fontSize:12,color:"var(--color-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }} title={book.name}>{book.name.replace(".pdf","")}</span>
-
-                      {/* Page offset badge / editor */}
-                      {editingOffset?.bookId === book.id && editingOffset?.classId === cls.id ? (
-                        <input
-                          ref={offsetInputRef}
-                          type="number"
-                          value={offsetDraft}
-                          onChange={e=>setOffsetDraft(e.target.value)}
-                          onKeyDown={e=>{
-                            if(e.key==="Enter"){e.stopPropagation();commitOffset(cls.id,book.id);}
-                            if(e.key==="Escape"){e.stopPropagation();setEditingOffset(null);}
-                          }}
-                          onBlur={()=>commitOffset(cls.id,book.id)}
-                          onClick={e=>e.stopPropagation()}
-                          placeholder="0"
-                          style={{ width:44,fontSize:11,padding:"2px 4px",border:`0.5px solid ${cls.color}`,borderRadius:4,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",outline:"none",fontFamily:"var(--font-mono)",textAlign:"center" }}
-                        />
-                      ) : (
-                        <button
-                          className="offset-btn"
-                          title="Set page offset (add this to book page numbers to get PDF page numbers)"
-                          onClick={e=>{e.stopPropagation();setOffsetDraft(String(book.pageOffset||0));setEditingOffset({bookId:book.id,classId:cls.id});}}
-                          style={{ fontSize:10,padding:"1px 5px",borderRadius:4,border:`0.5px solid ${book.pageOffset?cls.color:"var(--color-border-tertiary)"}`,background:book.pageOffset?`${cls.color}18`:"transparent",color:book.pageOffset?cls.color:"var(--color-text-tertiary)",cursor:"pointer",whiteSpace:"nowrap",opacity:book.pageOffset?1:0,transition:"opacity 0.15s",fontFamily:"var(--font-mono)" }}>
-                          {book.pageOffset > 0 ? `+${book.pageOffset}` : book.pageOffset < 0 ? `${book.pageOffset}` : "p+0"}
-                        </button>
-                      )}
 
                       <button onClick={e=>{e.stopPropagation();deleteBook(cls.id,book.id);}} style={{ background:"none",border:"none",cursor:"pointer",color:"var(--color-text-tertiary)",padding:1,display:"flex",opacity:0,flexShrink:0 }}
                         onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=0}><TrashIcon size={10}/></button>
@@ -667,7 +589,6 @@ export default function App() {
                 {selectedBooks.map(b => (
                   <span key={b.id} style={{ fontSize:11,background:`${activeClass.color}18`,color:activeClass.color,padding:"2px 7px",borderRadius:10,border:`0.5px solid ${activeClass.color}35`,whiteSpace:"nowrap" }}>
                     {b.name.replace(".pdf","")}
-                    {b.pageOffset ? <span style={{ opacity:0.7 }}> (+{b.pageOffset})</span> : null}
                   </span>
                 ))}
               </>
@@ -682,30 +603,13 @@ export default function App() {
               <button onClick={()=>setShowSettings(true)} style={{ fontSize:11,padding:"4px 10px",background:"#FEF3C7",color:"#92400E",border:"0.5px solid #F59E0B50",borderRadius:6,cursor:"pointer",whiteSpace:"nowrap" }}>⚠ Add key</button>
             )}
             {selectedBooks.length > 0 && (<>
-              <div style={{ display:"flex",alignItems:"center",gap:5 }}>
-                <label style={{ fontSize:11,color:"var(--color-text-tertiary)" }}>Book pages</label>
-                <input value={pageRange} onChange={e=>setPageRange(e.target.value)} placeholder="2-4"
-                  title="Enter book page numbers — page offsets per PDF are applied automatically"
-                  style={{ width:68,fontSize:12,padding:"4px 7px",border:"0.5px solid var(--color-border-secondary)",borderRadius:6,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",outline:"none" }}/>
-              </div>
+              <input value={pageRange} onChange={e=>setPageRange(e.target.value)} placeholder="Pages e.g. 5-20"
+                title="Focus the AI on specific pages — type a page number or range like 5-20"
+                style={{ width:130,fontSize:12,padding:"4px 9px",border:"0.5px solid var(--color-border-secondary)",borderRadius:6,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",fontFamily:"var(--font-sans)",outline:"none" }}/>
               <button onClick={()=>{setChat([]);idb.clearMessages();}} style={{ fontSize:12,padding:"4px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:6,background:"transparent",cursor:"pointer",color:"var(--color-text-secondary)",whiteSpace:"nowrap" }}>Clear</button>
             </>)}
           </div>
         </div>
-
-        {/* Page offset hint shown when a selected book has an offset and page range is set */}
-        {selectedBooks.some(b => b.pageOffset) && pageRange && (
-          <div style={{ background:"#EFF6FF",borderBottom:"0.5px solid #BFDBFE",padding:"5px 18px",display:"flex",gap:16,flexWrap:"wrap" }}>
-            {selectedBooks.filter(b => b.pageOffset).map(b => {
-              const { bookRange, pdfRange } = translatePageRange(pageRange, b.pageOffset);
-              return (
-                <span key={b.id} style={{ fontSize:11,color:"#1E40AF" }}>
-                  <strong>{b.name.replace(".pdf","")}</strong>: book pp.{bookRange} → PDF pp.{pdfRange}
-                </span>
-              );
-            })}
-          </div>
-        )}
 
         {/* Chat area */}
         <div style={{ flex:1,overflowY:"auto",padding:"20px 20px 10px" }}>
