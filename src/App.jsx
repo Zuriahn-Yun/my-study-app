@@ -302,6 +302,10 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState({});
   const [activeProvider, setActiveProvider] = useState("claude");
   const [activeModelId, setActiveModelId] = useState("claude-sonnet-4-5");
+  const [urlInputClassId, setUrlInputClassId] = useState(null);
+  const [urlDraft, setUrlDraft] = useState("");
+  const [fetchingUrl, setFetchingUrl] = useState(false);
+  const [urlError, setUrlError] = useState("");
   const fileInputRef = useRef();
   const chatEndRef = useRef();
   const textareaRef = useRef();
@@ -432,6 +436,70 @@ export default function App() {
       idb.putClass(updatedClass);
     }
     setUploadingClass(null);
+  }
+
+  async function addFromUrl(rawUrl, classId) {
+    const url = rawUrl.trim();
+    if (!url) return;
+    const targetId = classId || activeClassId;
+    if (!targetId) return;
+    setFetchingUrl(true);
+    setUrlError("");
+
+    // Helper: fetch with a 20s timeout
+    function fetchWithTimeout(u) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 20000);
+      return fetch(u, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+    }
+
+    try {
+      // Try direct, then two CORS proxies in sequence
+      const attempts = [
+        () => fetchWithTimeout(url),
+        () => fetchWithTimeout(`https://corsproxy.io/?url=${encodeURIComponent(url)}`),
+        () => fetchWithTimeout(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`),
+      ];
+      let response;
+      let lastErr;
+      for (const attempt of attempts) {
+        try { response = await attempt(); if (response.ok) break; } catch(e) { lastErr = e; response = null; }
+      }
+      if (!response?.ok) throw new Error(lastErr?.message || "All fetch attempts failed — try downloading the file and uploading it directly.");
+
+      const contentType = response.headers.get("content-type") || "";
+      const isPdf = contentType.includes("pdf") || url.toLowerCase().split("?")[0].endsWith(".pdf");
+
+      let book;
+      if (isPdf) {
+        const arrayBuffer = await response.arrayBuffer();
+        const data = encode64(arrayBuffer);
+        const rawName = decodeURIComponent(url.split("/").pop().split("?")[0]) || "document.pdf";
+        const name = rawName.endsWith(".pdf") ? rawName : rawName + ".pdf";
+        book = { id: Date.now().toString() + Math.random(), name, size: arrayBuffer.byteLength, data, fileType: "pdf", pageOffset: 0 };
+      } else {
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        doc.querySelectorAll("script,style,nav,header,footer,aside,[role=navigation]").forEach(el => el.remove());
+        const main = doc.querySelector("main,article,[role=main]") || doc.body;
+        const text = main?.textContent?.replace(/\s+/g, " ").trim() || "";
+        const name = (doc.title?.trim() || decodeURIComponent(url.split("/").filter(Boolean).pop()) || "webpage") + ".txt";
+        book = { id: Date.now().toString() + Math.random(), name, size: text.length, text, fileType: "txt", pageOffset: 0 };
+      }
+
+      const targetClass = classes.find(c => c.id === targetId);
+      if (targetClass) {
+        const updatedClass = { ...targetClass, books: [...targetClass.books, book] };
+        setClasses(prev => prev.map(c => c.id === targetId ? updatedClass : c));
+        idb.putClass(updatedClass);
+      }
+      setUrlDraft("");
+      setUrlInputClassId(null);
+    } catch (err) {
+      setUrlError(err.message || "Could not fetch URL");
+    } finally {
+      setFetchingUrl(false);
+    }
   }
 
   function deleteBook(classId, bookId) {
@@ -625,6 +693,38 @@ export default function App() {
                       ? <span style={{ fontSize:11,color:"var(--color-text-tertiary)",display:"flex",alignItems:"center",justifyContent:"center",gap:4 }}><SpinIcon size={10}/>Adding…</span>
                       : <span style={{ fontSize:11,color:"var(--color-text-tertiary)" }}>+ Add Documents</span>}
                   </div>
+
+                  {/* URL import */}
+                  {urlInputClassId === cls.id ? (
+                    <div style={{ margin:"0 7px 8px",display:"flex",flexDirection:"column",gap:4 }}>
+                      <div style={{ display:"flex",gap:4 }}>
+                        <input
+                          autoFocus
+                          value={urlDraft}
+                          onChange={e=>{setUrlDraft(e.target.value);setUrlError("");}}
+                          onKeyDown={e=>{
+                            if(e.key==="Enter") addFromUrl(urlDraft,cls.id);
+                            if(e.key==="Escape"){setUrlInputClassId(null);setUrlDraft("");setUrlError("");}
+                          }}
+                          placeholder="https://…"
+                          style={{ flex:1,fontSize:11,padding:"4px 7px",border:`0.5px solid ${cls.color}`,borderRadius:5,background:"var(--color-background-secondary)",color:"var(--color-text-primary)",outline:"none",fontFamily:"var(--font-sans)" }}
+                        />
+                        <button onClick={()=>addFromUrl(urlDraft,cls.id)} disabled={fetchingUrl||!urlDraft.trim()}
+                          style={{ fontSize:11,padding:"4px 8px",background:cls.color,color:"white",border:"none",borderRadius:5,cursor:"pointer",opacity:fetchingUrl||!urlDraft.trim()?0.5:1,display:"flex",alignItems:"center",gap:3 }}>
+                          {fetchingUrl?<SpinIcon size={9}/>:null}Add
+                        </button>
+                      </div>
+                      {urlError && <p style={{ margin:0,fontSize:10,color:"#DC2626",paddingLeft:2 }}>{urlError}</p>}
+                      <p style={{ margin:0,fontSize:10,color:"var(--color-text-tertiary)",paddingLeft:2 }}>
+                        Paste a PDF URL or web page. e.g. …/slp3/2.pdf
+                      </p>
+                    </div>
+                  ) : (
+                    <button onClick={()=>{setUrlInputClassId(cls.id);setUrlDraft("");setUrlError("");}}
+                      style={{ margin:"0 7px 8px",fontSize:11,color:"var(--color-text-tertiary)",background:"none",border:"none",cursor:"pointer",textAlign:"left",padding:"2px 4px" }}>
+                      + From URL
+                    </button>
+                  )}
                 </div>
               )}
             </div>
