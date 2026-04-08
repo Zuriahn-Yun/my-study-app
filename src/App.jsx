@@ -41,13 +41,42 @@ function encode64(buffer) {
 }
 async function fileToBase64(file) { return encode64(await file.arrayBuffer()); }
 
+// Returns a normalised file type key, or null if unsupported.
+function getFileType(filename) {
+  const ext = filename.split(".").pop().toLowerCase();
+  return { pdf:"pdf", docx:"docx", doc:"docx", xlsx:"xlsx", xls:"xlsx", csv:"csv", txt:"txt", md:"txt" }[ext] ?? null;
+}
+
+// Extract plain text from non-PDF files using dynamically-imported parsers.
+async function extractText(file) {
+  const ext = file.name.split(".").pop().toLowerCase();
+  if (ext === "txt" || ext === "md" || ext === "csv") return file.text();
+  if (ext === "docx" || ext === "doc") {
+    const mammoth = (await import("mammoth")).default;
+    const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
+    return result.value;
+  }
+  if (ext === "xlsx" || ext === "xls") {
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    return workbook.SheetNames.map(name =>
+      `[Sheet: ${name}]\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`
+    ).join("\n\n");
+  }
+  return "";
+}
+
 
 async function callClaude({ apiKey, modelId, systemPrompt, messages, books }) {
-  const pdfBlocks = books.map(b => ({ type: "document", source: { type: "base64", media_type: "application/pdf", data: b.data } }));
+  const docBlocks = books.map(b =>
+    b.data
+      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: b.data } }
+      : { type: "text", text: `[Document: ${b.name}]\n\n${b.text || ""}` }
+  );
   const lastUser = messages[messages.length - 1];
   const apiMessages = [
     ...messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
-    { role: "user", content: [...pdfBlocks, { type: "text", text: lastUser.content }] },
+    { role: "user", content: [...docBlocks, { type: "text", text: lastUser.content }] },
   ];
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -60,11 +89,15 @@ async function callClaude({ apiKey, modelId, systemPrompt, messages, books }) {
 }
 
 async function callGemini({ apiKey, modelId, systemPrompt, messages, books }) {
-  const pdfParts = books.map(b => ({ inline_data: { mime_type: "application/pdf", data: b.data } }));
+  const docParts = books.map(b =>
+    b.data
+      ? { inline_data: { mime_type: "application/pdf", data: b.data } }
+      : { text: `[Document: ${b.name}]\n\n${b.text || ""}` }
+  );
   const lastUser = messages[messages.length - 1];
   const contents = [
     ...messages.slice(0, -1).map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
-    { role: "user", parts: [...pdfParts, { text: lastUser.content }] },
+    { role: "user", parts: [...docParts, { text: lastUser.content }] },
   ];
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
     method: "POST",
@@ -77,14 +110,18 @@ async function callGemini({ apiKey, modelId, systemPrompt, messages, books }) {
 }
 
 async function callOpenAI({ apiKey, modelId, systemPrompt, messages, books }) {
-  const pdfNote = books.length > 0
-    ? `[${books.length} PDF(s) referenced: ${books.map(b => b.name).join(", ")}. OpenAI does not accept raw PDF binaries — paste text excerpts from the document for best results.]`
+  const pdfBooks = books.filter(b => b.data);
+  const textBooks = books.filter(b => b.text);
+  const pdfNote = pdfBooks.length > 0
+    ? `[${pdfBooks.length} PDF(s) referenced: ${pdfBooks.map(b => b.name).join(", ")}. OpenAI does not accept raw PDF binaries — paste text excerpts for best results.]`
     : "";
+  const textContent = textBooks.map(b => `[Document: ${b.name}]\n\n${b.text}`).join("\n\n---\n\n");
   const lastUser = messages[messages.length - 1];
+  const prefix = [pdfNote, textContent].filter(Boolean).join("\n\n");
   const apiMessages = [
     { role: "system", content: systemPrompt },
     ...messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
-    { role: "user", content: pdfNote ? `${pdfNote}\n\n${lastUser.content}` : lastUser.content },
+    { role: "user", content: prefix ? `${prefix}\n\n${lastUser.content}` : lastUser.content },
   ];
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -336,7 +373,18 @@ export default function App() {
       try {
         const handles = await window.showOpenFilePicker({
           multiple: true,
-          types: [{ description: "PDF files", accept: { "application/pdf": [".pdf"] } }],
+          types: [{
+            description: "Documents",
+            accept: {
+              "application/pdf": [".pdf"],
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+              "application/msword": [".doc"],
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+              "application/vnd.ms-excel": [".xls"],
+              "text/csv": [".csv"],
+              "text/plain": [".txt", ".md"],
+            },
+          }],
         });
         await addBooks(handles, classId);
       } catch (err) {
@@ -357,17 +405,22 @@ export default function App() {
     const newBooks = [];
     for (const item of items) {
       const isHandle = typeof item.getFile === "function";
+      const fileType = getFileType(item.name);
+      if (!fileType) continue;
       if (isHandle) {
-        if (!item.name.toLowerCase().endsWith(".pdf")) continue;
         try {
           const file = await item.getFile();
-          newBooks.push({ id: Date.now().toString() + Math.random(), name: item.name, size: file.size, handle: item, pageOffset: 0 });
+          newBooks.push({ id: Date.now().toString() + Math.random(), name: item.name, size: file.size, handle: item, fileType, pageOffset: 0 });
         } catch (err) { console.warn("Could not read handle:", err); }
       } else {
-        if (!item.type.includes("pdf")) continue;
         try {
-          const data = await fileToBase64(item);
-          newBooks.push({ id: Date.now().toString() + Math.random(), name: item.name, size: item.size, data, pageOffset: 0 });
+          if (fileType === "pdf") {
+            const data = await fileToBase64(item);
+            newBooks.push({ id: Date.now().toString() + Math.random(), name: item.name, size: item.size, data, fileType, pageOffset: 0 });
+          } else {
+            const text = await extractText(item);
+            newBooks.push({ id: Date.now().toString() + Math.random(), name: item.name, size: item.size, text, fileType, pageOffset: 0 });
+          }
         } catch (err) { console.warn("Could not read file:", err); }
       }
     }
@@ -408,7 +461,7 @@ export default function App() {
     // permission (required after page reloads) and read the file fresh from disk.
     const booksWithData = [];
     for (const book of selectedBooks) {
-      if (book.data) { booksWithData.push(book); continue; }
+      if (book.data || book.text) { booksWithData.push(book); continue; }
       if (!book.handle) continue;
 
       let perm = await book.handle.queryPermission({ mode: "read" });
@@ -421,8 +474,13 @@ export default function App() {
       }
       try {
         const file = await book.handle.getFile();
-        const data = await fileToBase64(file);
-        booksWithData.push({ ...book, data });
+        if (book.fileType === "pdf") {
+          const data = await fileToBase64(file);
+          booksWithData.push({ ...book, data });
+        } else {
+          const text = await extractText(file);
+          booksWithData.push({ ...book, text });
+        }
       } catch (err) {
         const errMsg = { role: "assistant", content: `**Could not read** "${book.name}": ${err.message}`, provider: activeProvider, model: activeModelId };
         idb.addMessage(errMsg);
@@ -553,7 +611,7 @@ export default function App() {
                               .filter(i => i.kind === "file")
                               .map(i => i.getAsFileSystemHandle())
                           );
-                          await addBooks(handles.filter(h => h.kind === "file"), cls.id);
+                          await addBooks(handles.filter(h => h.kind === "file" && getFileType(h.name)), cls.id);
                         } catch {
                           await addBooks([...e.dataTransfer.files], cls.id);
                         }
@@ -565,7 +623,7 @@ export default function App() {
                     style={{ margin:"3px 7px 8px",padding:"7px",border:`1px dashed ${dragOver&&uploadingClass===cls.id?cls.color:"var(--color-border-tertiary)"}`,borderRadius:6,cursor:"pointer",textAlign:"center",transition:"all 0.15s",background:dragOver&&uploadingClass===cls.id?`${cls.color}11`:"transparent" }}>
                     {uploadingClass===cls.id
                       ? <span style={{ fontSize:11,color:"var(--color-text-tertiary)",display:"flex",alignItems:"center",justifyContent:"center",gap:4 }}><SpinIcon size={10}/>Adding…</span>
-                      : <span style={{ fontSize:11,color:"var(--color-text-tertiary)" }}>+ Add PDFs</span>}
+                      : <span style={{ fontSize:11,color:"var(--color-text-tertiary)" }}>+ Add Documents</span>}
                   </div>
                 </div>
               )}
@@ -573,7 +631,7 @@ export default function App() {
           ))}
         </div>
         {/* Fallback file input for non-FS-Access browsers */}
-        <input ref={fileInputRef} type="file" accept=".pdf" multiple style={{ display:"none" }} onChange={e=>{addBooks(Array.from(e.target.files));e.target.value="";}}/>
+        <input ref={fileInputRef} type="file" accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.txt,.md" multiple style={{ display:"none" }} onChange={e=>{addBooks(Array.from(e.target.files));e.target.value="";}}/>
       </div>
 
       {/* Main */}
@@ -618,8 +676,8 @@ export default function App() {
               <div style={{ width:52,height:52,borderRadius:14,background:"var(--color-background-secondary)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 14px" }}><BookIcon size={26}/></div>
               <p style={{ fontSize:16,fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px" }}>Book Analysis Pipeline</p>
               <p style={{ fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 22px",maxWidth:360,marginLeft:"auto",marginRight:"auto" }}>
-                Create a class, add PDFs, select books, then ask anything.
-                {HAS_FS_ACCESS ? " PDFs stay on your device — only read when you send a message." : ""}
+                Create a class, add documents, select them, then ask anything.
+                {HAS_FS_ACCESS ? " Files stay on your device — only read when you send a message." : ""}
               </p>
               <div style={{ display:"flex",justifyContent:"center",gap:8,flexWrap:"wrap" }}>
                 {Object.values(PROVIDERS).map(p => (
