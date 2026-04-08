@@ -18,9 +18,9 @@ const PROVIDERS = {
     id: "gemini", label: "Gemini", color: "#4285F4", bg: "#EFF6FF", textColor: "#1E40AF", logo: "G",
     keyLabel: "Google AI API Key", keyPlaceholder: "AIza...", keyHint: "Get key at aistudio.google.com",
     models: [
-      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", note: "Most capable" },
-      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", note: "Balanced" },
-      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", note: "Fast" },
+      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", note: "Free tier · balanced" },
+      { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", note: "Free tier · efficient" },
+      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", note: "Paid only · most capable" },
     ],
   },
   openai: {
